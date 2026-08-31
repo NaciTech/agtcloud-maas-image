@@ -80,8 +80,8 @@ slave 会等 master 就绪后自动启动，不用手工控制顺序。
 
 ```bash
 kubectl -n new-api logs -f deployment/new-api-master
-kubectl -n new-api port-forward svc/new-api 3001:3001
-curl http://localhost:3001/api/status
+kubectl -n new-api port-forward svc/new-api 3000:3000
+curl http://localhost:3000/api/status
 ```
 
 访问站点，**第一个注册的账号自动成为超级管理员**，请立刻注册。

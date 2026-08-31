@@ -3,7 +3,7 @@
 # 用法见 README.md。改完下面标了 ⚠️ 的地方后：
 #   kubectl apply -f deploy.yaml
 #
-# 端口统一 3001。要改的话下面 5 处（PORT / 两个 containerPort / 两个 Service port /
+# 端口统一 3000。要改的话下面 5 处（PORT / 两个 containerPort / 两个 Service port /
 # initContainer 等待地址）必须一起改。
 
 apiVersion: v1
@@ -61,7 +61,9 @@ metadata:
   namespace: new-api
 data:
   TZ: "Asia/Shanghai"
-  PORT: "3001"
+  # 与镜像默认端口一致。K8s 里每个 Pod 有独立网络命名空间，
+  # 同一节点上多个 Pod 都监听 3000 也不冲突，一般不需要改。
+  PORT: "3000"
 
   # ⚠️ 站点标识，每个站点必须唯一。也是动态调度读取的 key 后缀
   #    （availability:weights:<BATCH_SITE>）。填错会读到空结果，
@@ -129,7 +131,7 @@ spec:
           image: ghcr.io/nacitech/agtcloud-maas-image:latest
           imagePullPolicy: IfNotPresent
           args: ["--log-dir="]        # 空值 = 不落盘，只输出 stdout 交给集群日志采集
-          ports: [{ name: http, containerPort: 3001 }]
+          ports: [{ name: http, containerPort: 3000 }]
           env:
             - { name: NODE_TYPE, value: "master" }
           envFrom:
@@ -174,7 +176,7 @@ metadata:
 spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: new-api }
-  ports: [{ name: http, port: 3001, targetPort: http }]
+  ports: [{ name: http, port: 3000, targetPort: http }]
 
 ---
 # 只指向 master。slave 的 initContainer 靠它判断迁移是否完成。不要把外部流量指到这里
@@ -186,7 +188,7 @@ metadata:
 spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: master }
-  ports: [{ name: http, port: 3001, targetPort: http }]
+  ports: [{ name: http, port: 3000, targetPort: http }]
 
 ---
 # slave：无状态，可任意扩缩容，承接主要流量。与 master 唯一区别是 NODE_TYPE=slave
@@ -220,7 +222,7 @@ spec:
             - -c
             - |
               echo "等待 master 就绪（数据库迁移完成）..."
-              until wget -q -O- http://new-api-master:3001/api/status 2>/dev/null | grep -qE '"success":[[:space:]]*true'; do
+              until wget -q -O- http://new-api-master:3000/api/status 2>/dev/null | grep -qE '"success":[[:space:]]*true'; do
                 echo "  master 未就绪，5 秒后重试"
                 sleep 5
               done
@@ -233,7 +235,7 @@ spec:
           image: ghcr.io/nacitech/agtcloud-maas-image:latest
           imagePullPolicy: IfNotPresent
           args: ["--log-dir="]
-          ports: [{ name: http, containerPort: 3001 }]
+          ports: [{ name: http, containerPort: 3000 }]
           env:
             - { name: NODE_TYPE, value: "slave" }   # ⚠️ 这行是与 master 的全部区别，不要删
           envFrom:

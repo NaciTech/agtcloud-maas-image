@@ -26,13 +26,19 @@ metadata:
   namespace: new-api
 type: Opaque
 stringData:
-  # 必须外部 MySQL/PostgreSQL，多副本下不能用 SQLite。MySQL 结尾必须带 parseTime=true
-  SQL_DSN: "newapi:CHANGE_ME@tcp(mysql.example.com:3306)/new_api?parseTime=true&charset=utf8mb4&loc=Local"
-  # PostgreSQL 格式（二选一）:
-  # SQL_DSN: "postgresql://newapi:CHANGE_ME@postgres.example.com:5432/new_api?sslmode=disable"
+  # ⚠️ 必须使用 PostgreSQL。不支持 MySQL。多副本下也不能用 SQLite（单文件数据库会数据分裂）。
+  #
+  # 前缀必须是 postgresql:// 或 postgres://——程序靠这个前缀判断数据库类型。
+  # 写成 MySQL 那种 user:pass@tcp(host)/db 格式会被当成 MySQL 处理，启动即失败。
+  #
+  # sslmode 按数据库实际配置填：
+  #   disable      不加密，同 VPC 内网常用
+  #   require      加密但不校验证书
+  #   verify-full  加密并校验证书，最严格
+  SQL_DSN: "postgresql://newapi:CHANGE_ME@postgres.example.com:5432/new_api?sslmode=disable"
 
-  # 可选：调用日志量远大于业务数据，量大时单独指向一个库
-  # LOG_SQL_DSN: "newapi:CHANGE_ME@tcp(mysql.example.com:3306)/new_api_log?parseTime=true&charset=utf8mb4&loc=Local"
+  # 可选：调用日志量远大于业务数据，量大时单独指向一个库。同样必须是 PostgreSQL。
+  # LOG_SQL_DSN: "postgresql://newapi:CHANGE_ME@postgres.example.com:5432/new_api_log?sslmode=disable"
 
   # 多副本必须配，否则各副本额度不同步，会出现超额扣费
   REDIS_CONN_STRING: "redis://:CHANGE_ME@redis.example.com:6379/0"

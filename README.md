@@ -13,20 +13,26 @@ ghcr.io/nacitech/agtcloud-maas-image
 | 组件 | 要求 | 说明 |
 |---|---|---|
 | Kubernetes | 1.21+ | |
-| MySQL / PostgreSQL | MySQL 8.0+ / PG 13+ | **必须外部提供，不能用 SQLite** |
+| **PostgreSQL** | 13+ | **必须外部提供。不支持 MySQL，也不能用 SQLite** |
 | Redis | 5.0+ | **必须配** |
 | Ingress | ingress-nginx | 或自备 LoadBalancer / NodePort |
 
-多副本下 SQLite 会数据分裂（单文件数据库，各 Pod 各写各的）；不配 Redis 则各副本
-额度不同步，并发请求会击穿额度限制，**余额被扣成负数**。这两条都不是可选项。
+数据库**只支持 PostgreSQL**。程序靠 `SQL_DSN` 的 `postgresql://` 前缀识别类型，
+填成 MySQL 格式会启动失败。多副本下 SQLite 会数据分裂（单文件数据库，各 Pod 各写各的）。
+
+不配 Redis 则各副本额度不同步，并发请求会击穿额度限制，**余额被扣成负数**。
+这两条都不是可选项。
 
 建库即可，表结构由程序自动迁移，不需要导入 SQL：
 
 ```sql
-CREATE DATABASE new_api DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-CREATE USER 'newapi'@'%' IDENTIFIED BY '你的密码';
-GRANT ALL PRIVILEGES ON new_api.* TO 'newapi'@'%';
-FLUSH PRIVILEGES;
+CREATE DATABASE new_api ENCODING 'UTF8';
+CREATE USER newapi WITH PASSWORD '你的密码';
+GRANT ALL PRIVILEGES ON DATABASE new_api TO newapi;
+
+-- PostgreSQL 15+ 还需要这两条，否则建表时报 permission denied for schema public
+\c new_api
+GRANT ALL ON SCHEMA public TO newapi;
 ```
 
 ---
@@ -44,7 +50,7 @@ openssl rand -hex 32    # CRYPTO_SECRET（必须与上面不同）
 
 | 配置项 | 说明 |
 |---|---|
-| `SQL_DSN` | 数据库连接串，MySQL 结尾必须带 `parseTime=true` |
+| `SQL_DSN` | PostgreSQL 连接串，**必须以 `postgresql://` 开头** |
 | `REDIS_CONN_STRING` | Redis 连接串 |
 | `SESSION_SECRET` | 会话密钥，**不能填 `random_string`，程序会拒绝启动** |
 | `CRYPTO_SECRET` | 渠道密钥加密密钥 |

@@ -1,0 +1,320 @@
+# AGT Cloud MaaS — Kubernetes 部署清单
+#
+# 用法见 README.md。改完下面标了 ⚠️ 的地方后：
+#   kubectl apply -f deploy.yaml
+#
+# 端口统一 3001。要改的话下面 5 处（PORT / 两个 containerPort / 两个 Service port /
+# initContainer 等待地址）必须一起改。
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: new-api
+
+---
+# ⚠️ 全部 CHANGE_ME 都要替换。生成密钥：openssl rand -hex 32
+#
+# ⚠️ SESSION_SECRET 和 CRYPTO_SECRET 一旦确定就不能再改：
+#    改 SESSION_SECRET → 所有用户被强制登出
+#    改 CRYPTO_SECRET  → 库里已加密的渠道 API Key 全部解不开，等于渠道配置丢失
+#    第一次部署就定好，并备份到密钥管理系统。
+#    SESSION_SECRET 不能填字面量 "random_string"，程序会拒绝启动。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: new-api-secret
+  namespace: new-api
+type: Opaque
+stringData:
+  # 必须外部 MySQL/PostgreSQL，多副本下不能用 SQLite。MySQL 结尾必须带 parseTime=true
+  SQL_DSN: "newapi:CHANGE_ME@tcp(mysql.example.com:3306)/new_api?parseTime=true&charset=utf8mb4&loc=Local"
+  # PostgreSQL 格式（二选一）:
+  # SQL_DSN: "postgresql://newapi:CHANGE_ME@postgres.example.com:5432/new_api?sslmode=disable"
+
+  # 可选：调用日志量远大于业务数据，量大时单独指向一个库
+  # LOG_SQL_DSN: "newapi:CHANGE_ME@tcp(mysql.example.com:3306)/new_api_log?parseTime=true&charset=utf8mb4&loc=Local"
+
+  # 多副本必须配，否则各副本额度不同步，会出现超额扣费
+  REDIS_CONN_STRING: "redis://:CHANGE_ME@redis.example.com:6379/0"
+
+  SESSION_SECRET: "CHANGE_ME_openssl_rand_hex_32"
+  CRYPTO_SECRET: "CHANGE_ME_ANOTHER_openssl_rand_hex_32"
+
+  # 📮 需要开启动态调度的，请联系管理员获取 Redis 连接信息。
+  #    这是跨站点共享的只读账号，和上面 REDIS_CONN_STRING 不是同一个。
+  #    不开启就删掉这行，并把下面 ConfigMap 的
+  #    CHANNEL_MODEL_WEIGHT_SYNC_ENABLED 设为 "false"，
+  #    否则 master 每 60 秒会试连失败一次并刷日志。
+  CHANNEL_MODEL_WEIGHT_REDIS_CONN_STRING: "redis://<用户名>:<密码>@<地址>:6379/0"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: new-api-config
+  namespace: new-api
+data:
+  TZ: "Asia/Shanghai"
+  PORT: "3001"
+
+  # ⚠️ 站点标识，每个站点必须唯一。也是动态调度读取的 key 后缀
+  #    （availability:weights:<BATCH_SITE>）。填错会读到空结果，
+  #    程序静默返回、不报错不打日志，动态调度就失效了。
+  BATCH_SITE: "17"
+  # ⚠️ 改成本站点真实前端地址，邮件和支付回调的绝对链接靠它生成
+  FRONTEND_BASE_URL: "https://api.example.com"
+
+  # 动态调度（渠道模型权重同步）。只在 master 节点运行
+  CHANNEL_MODEL_WEIGHT_SYNC_ENABLED: "true"
+  CHANNEL_MODEL_WEIGHT_SYNC_INTERVAL: "60"
+
+  MEMORY_CACHE_ENABLED: "true"
+  SYNC_FREQUENCY: "60"
+  BATCH_UPDATE_ENABLED: "true"
+  BATCH_UPDATE_INTERVAL: "10"
+
+  STREAMING_TIMEOUT: "600"
+  RELAY_TIMEOUT: "0"
+
+  # ⚠️ 这个大小写不是笔误，程序读的就是字面量 CountToken。
+  #    写成 COUNT_TOKEN 会读不到，静默回退默认值 true，token 计数被重新打开。
+  CountToken: "false"
+  GET_MEDIA_TOKEN: "false"
+
+  GLOBAL_API_RATE_LIMIT: "60000"
+  GLOBAL_WEB_RATE_LIMIT: "6000"
+
+  # ⚠️ 这是每个 Pod 的连接数上限，总数 = 本值 × Pod 总数。
+  #    按 master 1 + slave 最多 10 个算：200 × 11 = 2200。
+  #    必须小于数据库 max_connections，否则扩容时会打满数据库。
+  SQL_MAX_OPEN_CONNS: "200"
+  SQL_MAX_IDLE_CONNS: "20"
+  SQL_MAX_LIFETIME: "60"
+  RELAY_MAX_IDLE_CONNS: "500"
+  RELAY_MAX_IDLE_CONNS_PER_HOST: "100"
+
+  ERROR_LOG_ENABLED: "true"
+  DEBUG: "false"
+
+---
+# master：固定 1 副本，不要扩容，不要加 HPA。
+# 只有 master 会做：数据库表结构迁移、渠道健康检测与自动启停、渠道状态快照、
+# 动态调度权重同步、异步任务轮询。跑多个会重复执行，导致渠道被反复启停。
+# master 同时也正常承接 API 流量。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: new-api-master
+  namespace: new-api
+  labels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: master }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # 定时任务不能有两个实例并存，先停后起
+  selector:
+    matchLabels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: master }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: master }
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: new-api
+          image: ghcr.io/nacitech/agtcloud-maas-image:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--log-dir="]        # 空值 = 不落盘，只输出 stdout 交给集群日志采集
+          ports: [{ name: http, containerPort: 3001 }]
+          env:
+            - { name: NODE_TYPE, value: "master" }
+          envFrom:
+            - configMapRef: { name: new-api-config }
+            - secretRef: { name: new-api-secret }
+          startupProbe:               # 首次启动要跑数据库迁移，给 5 分钟
+            httpGet: { path: /api/status, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /api/status, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /api/status, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "10"] }   # 等 endpoints 摘除生效
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          volumeMounts:
+            # 请求体和文件缓存写系统临时目录。不挂 emptyDir 会写进容器可写层撑爆节点磁盘
+            - { name: tmp, mountPath: /tmp }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 4Gi }
+        - name: data
+          emptyDir: { sizeLimit: 1Gi }
+
+---
+# 业务 Service：同时选中 master 和 slave，两者都承接流量（selector 不带 component）
+apiVersion: v1
+kind: Service
+metadata:
+  name: new-api
+  namespace: new-api
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: new-api }
+  ports: [{ name: http, port: 3001, targetPort: http }]
+
+---
+# 只指向 master。slave 的 initContainer 靠它判断迁移是否完成。不要把外部流量指到这里
+apiVersion: v1
+kind: Service
+metadata:
+  name: new-api-master
+  namespace: new-api
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: master }
+  ports: [{ name: http, port: 3001, targetPort: http }]
+
+---
+# slave：无状态，可任意扩缩容，承接主要流量。与 master 唯一区别是 NODE_TYPE=slave
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: new-api-slave
+  namespace: new-api
+  labels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: slave }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: slave }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: slave }
+    spec:
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        # 数据库迁移只在 master 执行，slave 直接跳过。抢跑会连到还没建表的库上。
+        # 升级时同理：新版 slave 必须等新版 master 把 schema 升上去。
+        # 复用同一镜像（内含 wget），不额外引入镜像依赖。
+        - name: wait-for-master
+          image: ghcr.io/nacitech/agtcloud-maas-image:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "等待 master 就绪（数据库迁移完成）..."
+              until wget -q -O- http://new-api-master:3001/api/status 2>/dev/null | grep -qE '"success":[[:space:]]*true'; do
+                echo "  master 未就绪，5 秒后重试"
+                sleep 5
+              done
+              echo "master 已就绪，启动 slave"
+          resources:
+            requests: { cpu: "10m", memory: "32Mi" }
+            limits: { cpu: "200m", memory: "128Mi" }
+      containers:
+        - name: new-api
+          image: ghcr.io/nacitech/agtcloud-maas-image:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--log-dir="]
+          ports: [{ name: http, containerPort: 3001 }]
+          env:
+            - { name: NODE_TYPE, value: "slave" }   # ⚠️ 这行是与 master 的全部区别，不要删
+          envFrom:
+            - configMapRef: { name: new-api-config }
+            - secretRef: { name: new-api-secret }
+          startupProbe:
+            httpGet: { path: /api/status, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /api/status, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: { path: /api/status, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "10"] }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 4Gi }
+        - name: data
+          emptyDir: { sizeLimit: 1Gi }
+      # 副本打散到不同节点。单节点测试集群请删掉这段，否则第 2 个副本会一直 Pending
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: slave }
+
+---
+# 只对 slave 生效。master 单副本配 PDB 会让节点排水永远卡住
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: new-api-slave
+  namespace: new-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: new-api, app.kubernetes.io/component: slave }
+
+---
+# 入口。⚠️ 下面的注解一个都不能少，否则流式响应（打字机效果）会坏掉：
+#   proxy-buffering off  → 不关的话 SSE 被攒在代理侧，客户端要等整个回答生成完才一次性收到
+#   read/send-timeout    → 大模型首 token 可能等几十秒，默认 60s 会 504
+#   proxy-body-size      → 带图片或长上下文的请求体超过默认 1m 会返回 413
+#
+# 用 LoadBalancer / NodePort 的话，把这段删掉换成对应 Service，
+# 但上面三件事必须在云厂商 LB 控制台或你们前置的 Nginx 上配等效项。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: new-api
+  namespace: new-api
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # cert-manager 自动签证书的话取消注释并填 Issuer 名字
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["api.example.com"]        # ⚠️ 改成真实域名
+      secretName: new-api-tls
+  rules:
+    - host: api.example.com             # ⚠️ 改成真实域名
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: new-api
+                port: { name: http }

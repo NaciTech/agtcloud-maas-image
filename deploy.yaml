@@ -128,7 +128,7 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: new-api
-          image: ghcr.io/nacitech/agtcloud-maas-image:v1.1.0
+          image: ghcr.io/nacitech/agtcloud-maas-image:v1.2.0
           imagePullPolicy: IfNotPresent
           args: ["--log-dir="]        # 空值 = 不落盘，只输出 stdout 交给集群日志采集
           ports: [{ name: http, containerPort: 3000 }]
@@ -215,7 +215,7 @@ spec:
         # 升级时同理：新版 slave 必须等新版 master 把 schema 升上去。
         # 复用同一镜像（内含 wget），不额外引入镜像依赖。
         - name: wait-for-master
-          image: ghcr.io/nacitech/agtcloud-maas-image:v1.1.0
+          image: ghcr.io/nacitech/agtcloud-maas-image:v1.2.0
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -232,7 +232,7 @@ spec:
             limits: { cpu: "200m", memory: "128Mi" }
       containers:
         - name: new-api
-          image: ghcr.io/nacitech/agtcloud-maas-image:v1.1.0
+          image: ghcr.io/nacitech/agtcloud-maas-image:v1.2.0
           imagePullPolicy: IfNotPresent
           args: ["--log-dir="]
           ports: [{ name: http, containerPort: 3000 }]

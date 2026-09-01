@@ -107,11 +107,28 @@ curl http://localhost:3000/api/status
 
 **升级**（⚠️ 必须先 master 后 slave，迁移只在 master 执行）
 
+把下面的 `v1.1.0` 换成我们通知你的新版本号：
+
 ```bash
-kubectl -n new-api set image deployment/new-api-master new-api=ghcr.io/nacitech/agtcloud-maas-image:v1.2.0
+kubectl -n new-api set image deployment/new-api-master new-api=ghcr.io/nacitech/agtcloud-maas-image:v1.1.0
 kubectl -n new-api rollout status deployment/new-api-master
-kubectl -n new-api set image deployment/new-api-slave  new-api=ghcr.io/nacitech/agtcloud-maas-image:v1.2.0
+
+kubectl -n new-api set image deployment/new-api-slave \
+  wait-for-master=ghcr.io/nacitech/agtcloud-maas-image:v1.1.0 \
+  new-api=ghcr.io/nacitech/agtcloud-maas-image:v1.1.0
+kubectl -n new-api rollout status deployment/new-api-slave
 ```
+
+> slave 有两个容器（`wait-for-master` 初始化容器和 `new-api` 主容器）都用这个镜像，
+> 两个要一起改，否则 initContainer 还停在旧版本。
+
+也可以改 `deploy.yaml` 里的三处 `image:` 再 `kubectl apply -f deploy.yaml`，
+效果一样，还能让文件和线上保持一致，推荐这种。
+
+> ⚠️ **镜像标签固定为具体版本，不要改成 `:latest`。**
+> 文件里 `imagePullPolicy: IfNotPresent`，节点缓存过 `:latest` 后就不会再拉新的，
+> 你以为升级了其实没有，而且没有任何报错。用确定版本号才能保证升级真的生效，
+> 回滚也才有意义。
 
 > 升级前先备份数据库。迁移自动执行但不可逆。
 > master 是 `Recreate` 策略，升级期间定时任务暂停几十秒，API 流量由 slave 承接，不中断。
